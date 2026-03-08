@@ -63,7 +63,7 @@ if [[ -n "$PROXY" ]]; then
   CURL_OPTS+=(--proxy "$PROXY")
 fi
 
-curl -s "${CURL_OPTS[@]}" "${API_BASE}${TOP_PATH}" \
+curl -s ${CURL_OPTS[@]+"${CURL_OPTS[@]}"} "${API_BASE}${TOP_PATH}" \
   -H "X-Validation: ${TOP_TOKEN}" \
   -H "Content-Type: application/json" \
   --data "{\"chain\":\"${CHAIN}\",\"address\":\"${ADDRESS}\"}" \
@@ -73,7 +73,7 @@ jq -r '.[].address' /tmp/dy_jk_top_holders.json | jq -Rsc 'split("\n")[:-1]' > /
 
 SUB_TOKEN="$(build_token "$SUB_PATH")"
 
-curl -s "${CURL_OPTS[@]}" "${API_BASE}${SUB_PATH}" \
+curl -s ${CURL_OPTS[@]+"${CURL_OPTS[@]}"} "${API_BASE}${SUB_PATH}" \
   -H "X-Validation: ${SUB_TOKEN}" \
   -H "Content-Type: application/json" \
   --data @/tmp/dy_jk_address_list.json \

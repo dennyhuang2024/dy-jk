@@ -7,7 +7,7 @@ description: Analyze token trading direction with a full dashboard that includes
 
 ## Overview
 Use this skill for a one-command token dashboard in Chinese by default.
-It combines trading common sense and advanced signals: structure, liquidity, spot flow, derivatives flow, funding, concentration, and unlock overhang.
+It combines trading common sense and advanced signals: structure, spot flow, derivatives flow, futures/spot volume ratio, funding, long/short positioning, concentration, and unlock overhang.
 
 ## One Command (recommended)
 ```bash
@@ -26,8 +26,8 @@ It combines trading common sense and advanced signals: structure, liquidity, spo
 
 ## Metrics Included
 1. Structure: price, mcap, FDV, rank, returns.
-2. Spot: 24h aggregate spot volume + sampled venue breakdown.
-3. Derivatives: perp 24h quote volume, funding rate, open interest/holding amount (when listed).
+2. Spot: 24h spot volume, sampled venue breakdown, and exchange coverage.
+3. Derivatives: Coinglass-first perp 24h quote volume, futures/spot volume ratio, funding rate, open interest, and long/short ratio.
 4. Holder structure: top-holder coverage, non-CEX concentration, linked-cluster concentration.
 5. Unlock pressure: circulating ratio, unlock overhang, FDV/MCAP.
 6. Unlock event backtest: average pre7/post7/post14 returns around scheduled unlock dates (when preset exists).
@@ -36,6 +36,7 @@ It combines trading common sense and advanced signals: structure, liquidity, spo
 ## Notes
 - Default language: Chinese.
 - Depend on `curl`, `jq`, `node`, `awk`.
+- Set `COINGLASS_API_KEY` (or `CG_API_KEY`) to enable Coinglass spot/futures metrics.
 - If external APIs are blocked, use `--proxy`.
 - Keep execution as a single command to avoid repeated approval interruptions.
 - Unlock event backtest uses preset schedules in `/Users/denny/.codex/skills/dy-jk/references/unlock-presets.json`.

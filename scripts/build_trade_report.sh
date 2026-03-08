@@ -9,6 +9,7 @@ OUT=""
 RUN_CONCENTRATION="true"
 LANGUAGE="zh"
 PROXY="${DY_JK_PROXY:-}"
+COINGLASS_API_KEY="${COINGLASS_API_KEY:-${CG_API_KEY:-}}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,9 +44,9 @@ for cmd in curl jq node awk; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CURL_OPTS=()
+CURL_CMD=(curl -fsS)
 if [[ -n "$PROXY" ]]; then
-  CURL_OPTS+=(--proxy "$PROXY")
+  CURL_CMD+=(--proxy "$PROXY")
 fi
 
 if [[ "$RUN_CONCENTRATION" == "true" ]]; then
@@ -74,9 +75,12 @@ esac
 
 COIN_JSON="/tmp/dy_jk_coin.json"
 TICKERS_JSON="/tmp/dy_jk_tickers_p1.json"
+COINGLASS_SPOT_JSON="/tmp/dy_jk_coinglass_spot.json"
+COINGLASS_FUTURES_JSON="/tmp/dy_jk_coinglass_futures.json"
 BITGET_JSON="/tmp/dy_jk_bitget_ticker.json"
 UNLOCK_PRESETS_JSON="$SCRIPT_DIR/../references/unlock-presets.json"
 MARKET_SOURCE_STATUS="ok"
+SPOT_SOURCE_STATUS="coingecko"
 DERIV_SOURCE_STATUS="partial"
 UNLOCK_EVENT_STATUS="not_configured"
 unlock_avg_pre7="N/A"
@@ -90,7 +94,7 @@ unlock_last_date="N/A"
 unlock_last_pre7="N/A"
 unlock_last_post7="N/A"
 
-if ! curl -fsS "${CURL_OPTS[@]}" "https://api.coingecko.com/api/v3/coins/${PLATFORM_ID}/contract/${ADDRESS}" > "$COIN_JSON"; then
+if ! "${CURL_CMD[@]}" "https://api.coingecko.com/api/v3/coins/${PLATFORM_ID}/contract/${ADDRESS}" > "$COIN_JSON"; then
   MARKET_SOURCE_STATUS="unavailable"
   cat > "$COIN_JSON" <<'JSON'
 {"id":"unknown","name":"unknown","symbol":"unknown","market_cap_rank":null,"market_data":{"current_price":{"usd":0},"market_cap":{"usd":0},"fully_diluted_valuation":{"usd":0},"total_volume":{"usd":0},"ath":{"usd":0},"ath_date":{"usd":"-"},"atl":{"usd":0},"atl_date":{"usd":"-"},"price_change_percentage_7d":0,"price_change_percentage_30d":0,"price_change_percentage_1y":0,"circulating_supply":0,"total_supply":0,"max_supply":0}}
@@ -117,7 +121,7 @@ total_supply=$(jq -r '.market_data.total_supply // 0' "$COIN_JSON")
 max_supply=$(jq -r '.market_data.max_supply // 0' "$COIN_JSON")
 
 if [[ "$coin_id" != "unknown" ]]; then
-  if ! curl -fsS "${CURL_OPTS[@]}" "https://api.coingecko.com/api/v3/coins/${coin_id}/tickers?include_exchange_logo=false&page=1" > "$TICKERS_JSON"; then
+  if ! "${CURL_CMD[@]}" "https://api.coingecko.com/api/v3/coins/${coin_id}/tickers?include_exchange_logo=false&page=1" > "$TICKERS_JSON"; then
     MARKET_SOURCE_STATUS="partial"
     echo '{"tickers":[]}' > "$TICKERS_JSON"
   fi
@@ -130,19 +134,101 @@ spot_volume_sample=$(jq -r '([.tickers[]?.converted_volume.usd // 0] | add) // 0
 spot_top_venues=$(jq -r '[.tickers[]? | {m:(.market.identifier // "unknown"),v:(.converted_volume.usd // 0)}] | group_by(.m) | map({market:.[0].m, vol:(map(.v)|add)}) | sort_by(.vol) | reverse | .[0:5]' "$TICKERS_JSON")
 
 symbol_pair="${symbol}USDT"
-if curl -fsS "${CURL_OPTS[@]}" "https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES" > "$BITGET_JSON"; then
-  deriv_line=$(jq -r --arg s "$symbol_pair" '.data[]? | select(.symbol==$s) | [.symbol,.quoteVolume,.fundingRate,.holdingAmount,.markPrice,.indexPrice] | @tsv' "$BITGET_JSON" | head -n1)
-  if [[ -n "$deriv_line" ]]; then
-    DERIV_SOURCE_STATUS="ok"
-    IFS=$'\t' read -r deriv_symbol deriv_quote_vol deriv_funding deriv_oi deriv_mark deriv_index <<< "$deriv_line"
+spot_market_symbol="N/A"
+spot_volume_24h="$vol24"
+futures_market_symbol="N/A"
+deriv_quote_vol="0"
+deriv_funding="N/A"
+deriv_oi="N/A"
+deriv_mark="N/A"
+deriv_index="N/A"
+deriv_ls_ratio="N/A"
+deriv_ls_ratio_24h="N/A"
+
+if [[ -n "$COINGLASS_API_KEY" ]]; then
+  if "${CURL_CMD[@]}" -H "CG-API-KEY: ${COINGLASS_API_KEY}" "https://open-api-v4.coinglass.com/api/spot/coins-markets" > "$COINGLASS_SPOT_JSON"; then
+    coinglass_spot_line=$(jq -r --arg s "$symbol" '
+      (
+        .data // .data.list // .data.data // []
+      )
+      | map(select(((.symbol // .baseCoin // .coin // "") | ascii_upcase) == $s))
+      | sort_by(.volUsd24h // .volumeUsd24h // .volUsd // 0)
+      | reverse
+      | .[0]
+      | [
+          (.symbol // .baseCoin // .coin // "N/A"),
+          (.volUsd24h // .volumeUsd24h // .volUsd // 0),
+          (.exchanges // .exchangeNum // 0)
+        ]
+      | @tsv
+    ' "$COINGLASS_SPOT_JSON")
+    if [[ -n "$coinglass_spot_line" && "$coinglass_spot_line" != "null" ]]; then
+      SPOT_SOURCE_STATUS="coinglass"
+      IFS=$'\t' read -r spot_market_symbol spot_volume_24h spot_exchange_count <<< "$coinglass_spot_line"
+    else
+      SPOT_SOURCE_STATUS="coinglass_not_listed"
+      spot_exchange_count="N/A"
+    fi
   else
-    DERIV_SOURCE_STATUS="not_listed"
-    deriv_symbol="N/A"; deriv_quote_vol="0"; deriv_funding="N/A"; deriv_oi="N/A"; deriv_mark="N/A"; deriv_index="N/A"
+    SPOT_SOURCE_STATUS="coinglass_unavailable"
+    spot_exchange_count="N/A"
+  fi
+
+  if "${CURL_CMD[@]}" -H "CG-API-KEY: ${COINGLASS_API_KEY}" "https://open-api-v4.coinglass.com/api/futures/coins-markets" > "$COINGLASS_FUTURES_JSON"; then
+    coinglass_futures_line=$(jq -r --arg s "$symbol" '
+      (
+        .data // .data.list // .data.data // []
+      )
+      | map(select(((.symbol // .baseCoin // .coin // "") | ascii_upcase) == $s))
+      | sort_by(.volUsd // .volumeUsd24h // .openInterest // 0)
+      | reverse
+      | .[0]
+      | [
+          (.symbol // .baseCoin // .coin // "N/A"),
+          (.volUsd // .volumeUsd24h // 0),
+          (.avgFundingRateByOi // .fundingRate // "N/A"),
+          (.openInterest // .oiUsd // .openInterestUsd // "N/A"),
+          (.price // .markPrice // "N/A"),
+          (.indexPrice // "N/A"),
+          (.lsRatio // .longShortRatio // "N/A"),
+          (.ls24h // .longShortRatio24h // "N/A")
+        ]
+      | @tsv
+    ' "$COINGLASS_FUTURES_JSON")
+    if [[ -n "$coinglass_futures_line" && "$coinglass_futures_line" != "null" ]]; then
+      DERIV_SOURCE_STATUS="coinglass"
+      IFS=$'\t' read -r futures_market_symbol deriv_quote_vol deriv_funding deriv_oi deriv_mark deriv_index deriv_ls_ratio deriv_ls_ratio_24h <<< "$coinglass_futures_line"
+    else
+      DERIV_SOURCE_STATUS="coinglass_not_listed"
+    fi
+  else
+    DERIV_SOURCE_STATUS="coinglass_unavailable"
   fi
 else
-  DERIV_SOURCE_STATUS="unavailable"
-  deriv_symbol="N/A"; deriv_quote_vol="0"; deriv_funding="N/A"; deriv_oi="N/A"; deriv_mark="N/A"; deriv_index="N/A"
+  SPOT_SOURCE_STATUS="coinglass_key_missing"
+  spot_exchange_count="N/A"
+  DERIV_SOURCE_STATUS="coinglass_key_missing"
 fi
+
+if [[ "$DERIV_SOURCE_STATUS" != "coinglass" ]] && "${CURL_CMD[@]}" "https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES" > "$BITGET_JSON"; then
+  deriv_line=$(jq -r --arg s "$symbol_pair" '.data[]? | select(.symbol==$s) | [.symbol,.quoteVolume,.fundingRate,.holdingAmount,.markPrice,.indexPrice] | @tsv' "$BITGET_JSON" | head -n1)
+  if [[ -n "$deriv_line" ]]; then
+    DERIV_SOURCE_STATUS="${DERIV_SOURCE_STATUS}+bitget_fallback"
+    IFS=$'\t' read -r futures_market_symbol deriv_quote_vol deriv_funding deriv_oi deriv_mark deriv_index <<< "$deriv_line"
+  elif [[ "$DERIV_SOURCE_STATUS" == "coinglass_key_missing" || "$DERIV_SOURCE_STATUS" == "coinglass_unavailable" ]]; then
+    DERIV_SOURCE_STATUS="not_listed"
+  fi
+else
+  if [[ "$DERIV_SOURCE_STATUS" == "coinglass_key_missing" || "$DERIV_SOURCE_STATUS" == "coinglass_unavailable" ]]; then
+    DERIV_SOURCE_STATUS="unavailable"
+  fi
+fi
+
+if [[ "$SPOT_SOURCE_STATUS" != "coinglass" ]]; then
+  spot_exchange_count="$spot_ticker_count"
+fi
+
+futures_spot_ratio=$(awk "BEGIN{ if ($spot_volume_24h>0) printf \"%.2f\", $deriv_quote_vol/$spot_volume_24h; else print \"N/A\" }")
 
 CONC_JSON="/tmp/dy_jk_report.json"
 top_cov=$(jq -r '.top_holders_coverage_pct // 0' "$CONC_JSON")
@@ -168,13 +254,58 @@ fdv_mcap=$(awk "BEGIN{ if ($market_cap>0) printf \"%.2f\", $fdv/$market_cap; els
 cir_ratio=$(awk "BEGIN{ if ($max_supply>0) printf \"%.2f\", ($circulating/$max_supply)*100; else print \"0\" }")
 unlock_overhang=$(awk "BEGIN{ if ($max_supply>0) printf \"%.2f\", (1-($circulating/$max_supply))*100; else print \"0\" }")
 
+cn_flow_view="现货主导，合约跟随"
+if [[ "$futures_spot_ratio" != "N/A" ]]; then
+  if awk "BEGIN{exit !($futures_spot_ratio >= 3)}"; then
+    cn_flow_view="合约量显著高于现货，杠杆交易拥挤"
+  elif awk "BEGIN{exit !($futures_spot_ratio >= 1)}"; then
+    cn_flow_view="合约活跃度高于现货，短线更受衍生品驱动"
+  fi
+fi
+
+cn_funding_view="资金费率中性或缺失"
+if [[ "$deriv_funding" != "N/A" ]]; then
+  if awk "BEGIN{exit !($deriv_funding > 0.0005)}"; then
+    cn_funding_view="资金费率偏高，多头付费，追涨拥挤"
+  elif awk "BEGIN{exit !($deriv_funding < -0.0005)}"; then
+    cn_funding_view="资金费率偏负，空头占优，但存在反弹挤空条件"
+  else
+    cn_funding_view="资金费率温和，杠杆方向不算极端"
+  fi
+fi
+
+cn_ls_view="多空比缺失"
+if [[ "$deriv_ls_ratio" != "N/A" ]]; then
+  if awk "BEGIN{exit !($deriv_ls_ratio >= 1.3)}"; then
+    cn_ls_view="多空比明显偏多，注意长仓踩踏"
+  elif awk "BEGIN{exit !($deriv_ls_ratio <= 0.8)}"; then
+    cn_ls_view="多空比偏空，若价格抗跌则容易挤空"
+  else
+    cn_ls_view="多空比相对均衡"
+  fi
+fi
+
+cn_concentration_view="筹码分散度尚可"
+if awk "BEGIN{exit !($cluster_non_cex >= 70)}"; then
+  cn_concentration_view="非CEX关联集群过大，控盘和事件波动风险高"
+elif awk "BEGIN{exit !($cluster_non_cex >= 50)}"; then
+  cn_concentration_view="筹码偏集中，注意大户转账和上所行为"
+fi
+
+cn_unlock_view="解锁压力一般"
+if awk "BEGIN{exit !($unlock_overhang >= 70)}"; then
+  cn_unlock_view="未流通筹码占比很高，后续解锁压制不可忽视"
+elif awk "BEGIN{exit !($unlock_overhang >= 40)}"; then
+  cn_unlock_view="仍有较明显解锁空间，需要结合日程观察"
+fi
+
 if [[ "$coin_id" != "unknown" && -f "$UNLOCK_PRESETS_JSON" ]]; then
   unlock_start=$(jq -r --arg id "$coin_id" '.[$id].start_date // empty' "$UNLOCK_PRESETS_JSON")
   unlock_months=$(jq -r --arg id "$coin_id" '.[$id].months // 0' "$UNLOCK_PRESETS_JSON")
   unlock_day=$(jq -r --arg id "$coin_id" '.[$id].unlock_day // 20' "$UNLOCK_PRESETS_JSON")
   if [[ -n "$unlock_start" && "$unlock_months" != "0" ]]; then
     UNLOCK_EVENT_STATUS="ok"
-    if curl -fsS "${CURL_OPTS[@]}" -H 'accept: application/json' -H 'user-agent: Mozilla/5.0' "https://api.coingecko.com/api/v3/coins/${coin_id}/market_chart?vs_currency=usd&days=365&interval=daily" > /tmp/dy_jk_unlock_chart.json; then
+    if "${CURL_CMD[@]}" -H 'accept: application/json' -H 'user-agent: Mozilla/5.0' "https://api.coingecko.com/api/v3/coins/${coin_id}/market_chart?vs_currency=usd&days=365&interval=daily" > /tmp/dy_jk_unlock_chart.json; then
       unlock_stats=$(COIN_ID="$coin_id" UNLOCK_START="$unlock_start" UNLOCK_MONTHS="$unlock_months" UNLOCK_DAY="$unlock_day" DATE_UTC="$DATE_UTC" python3 - <<'PY'
 import json, datetime, statistics, os
 coin_id=os.environ.get("COIN_ID")
@@ -279,14 +410,21 @@ Snapshot (concentration UTC): ${conc_snapshot}
 [2] Spot Liquidity (Exchange Sample)
 - Tickers sampled: ${spot_ticker_count}
 - Sampled spot volume sum (USD): ${spot_volume_sample}
+- Primary spot volume 24h (USD): ${spot_volume_24h}
+- Spot market symbol: ${spot_market_symbol}
+- Spot venues/exchanges: ${spot_exchange_count}
+- Spot source status: ${SPOT_SOURCE_STATUS}
 - Top venues (sample):
 $(jq -r '.[] | "  - " + .market + ": " + ((.vol|tostring))' <<< "$spot_top_venues")
 
 [3] Derivatives
-- Bitget perpetual symbol: ${deriv_symbol}
+- Futures market symbol: ${futures_market_symbol}
 - Perp 24h quote volume: ${deriv_quote_vol}
+- Futures/spot volume ratio: ${futures_spot_ratio}x
 - Funding rate: ${deriv_funding}
 - Open interest/holding amount: ${deriv_oi}
+- Long/short ratio: ${deriv_ls_ratio}
+- 24h long/short ratio: ${deriv_ls_ratio_24h}
 - Mark / Index: ${deriv_mark} / ${deriv_index}
 - Derivatives source status: ${DERIV_SOURCE_STATUS}
 
@@ -317,12 +455,21 @@ $(jq -r '.[] | "  - " + .market + ": " + ((.vol|tostring))' <<< "$spot_top_venue
 
 [7] Risk Interpretation
 - Liquidity proxy (24h vol / mcap): ${liquidity_ratio}
+- If futures/spot volume ratio > 3x with positive funding, treat as crowded leverage and watch long squeeze risk.
+- If futures/spot volume ratio < 1x, derivatives conviction is weaker; spot-led continuation is less reliable.
 - If non-CEX linked cluster > 70%, treat as event-driven asset; use smaller size and faster invalidation.
 - Watch cluster-to-CEX transfers as priority risk trigger.
 
 [8] Data Source Health
 - Market source status: ${MARKET_SOURCE_STATUS}
 - Concentration source: /tmp/dy_jk_report.json
+
+[9] 中文结论
+- 盘面驱动: ${cn_flow_view}
+- 杠杆情绪: ${cn_funding_view}
+- 多空结构: ${cn_ls_view}
+- 筹码判断: ${cn_concentration_view}
+- 解锁判断: ${cn_unlock_view}
 ========================================================
 DASH
 
